@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Side Chat",
+    "description": "Open a temporary conversation beside the main one; closing it archives the fork so the main line stays clean."
+  }
+}
