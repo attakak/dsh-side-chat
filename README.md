@@ -36,7 +36,7 @@
 ### 方式 A：让 DSH agent 安装（推荐）
 
 ```sh
-git clone <this-repo> ~/dsh-plugins/dsh-side-chat
+git clone https://github.com/attakak/dsh-side-chat.git ~/dsh-plugins/dsh-side-chat
 ```
 
 然后在 DSH 会话里说：「安装 `~/dsh-plugins/dsh-side-chat` 这个插件」。

@@ -42,6 +42,11 @@ window.__ModuleLoader__.load({
       'cite.label': '引用 · 事件',
       'cite.labelUnknown': '引用 · 事件未知',
       'cite.bodyMissing': '原文见主对话，点开事件编号可查',
+      'keep.do': '保留为正式对话',
+      'keep.undo': '取消保留',
+      'keep.note': '关闭标签后仍留在会话列表',
+      'keep.on': '已保留为正式对话',
+      'keep.off': '保留为正式对话',
     };
     const en = {
       'guide.title': 'Side chat',
@@ -61,10 +66,21 @@ window.__ModuleLoader__.load({
       'cite.label': 'Quote · event',
       'cite.labelUnknown': 'Quote · event unknown',
       'cite.bodyMissing': 'The passage lives in the main conversation',
+      'keep.do': 'Keep as a regular conversation',
+      'keep.undo': 'Stop keeping',
+      'keep.note': 'Stays in the session list after closing',
+      'keep.on': 'Kept as a regular conversation',
+      'keep.off': 'Keep as a regular conversation',
     };
 
     const CSS = [
-      '.dsh-sidechat-panel{height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden}',
+      '.dsh-sidechat-panel{position:relative;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden}',
+      '.dsh-sidechat-keep{position:absolute;top:8px;right:8px;z-index:10;display:inline-flex;align-items:center;',
+      'justify-content:center;width:24px;height:24px;padding:0;border-radius:6px;border:1px solid var(--dsw-alias-border-l1);',
+      'background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-secondary);cursor:pointer;',
+      'opacity:.72;transition:opacity 120ms ease,color 120ms ease,border-color 120ms ease}',
+      '.dsh-sidechat-keep:hover{opacity:1;border-color:var(--dsw-alias-border-l2)}',
+      '.dsh-sidechat-keep[data-kept=true]{color:var(--dsw-alias-brand-primary);opacity:1}',
       '.dsh-sidechat-panel>*{flex:1 1 auto;min-height:0}',
       '.dsh-sidechat-note{padding:16px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.6}',
       '.dsh-sidechat-ask{position:fixed;z-index:2147483000;display:flex;flex-direction:column;gap:6px;',
@@ -233,6 +249,22 @@ window.__ModuleLoader__.load({
 
     /** Session created for a tab that opened without navigation params. */
     const createdByTab = new Map();
+
+    /** Side Sessions promoted to regular conversations; closing must not archive them. */
+    const KEEP_STORAGE_KEY = 'dsh-side-chat:kept';
+    const keptSessions = new Set();
+    try {
+      const raw = localStorage.getItem(KEEP_STORAGE_KEY);
+      if (raw) {
+        for (const id of JSON.parse(raw)) keptSessions.add(id);
+      }
+    } catch { /* storage is optional */ }
+    function persistKept() {
+      try {
+        localStorage.setItem(KEEP_STORAGE_KEY, JSON.stringify([...keptSessions]));
+      } catch { /* storage is optional */ }
+    }
+
 
     /** On-screen main Session and its Chat node reader, for locating citations. */
     const mainContext = { sessionId: null, actions: null, readSeq: null, draft: '' };
@@ -600,6 +632,17 @@ window.__ModuleLoader__.load({
       const provided = params && params.childSessionId ? params.childSessionId : null;
       const childId = useSideSession(parentSessionId, tab ? tab.id : 'unknown', provided);
       const [reference, setReference] = useState(null);
+      const [kept, setKept] = useState(() => Boolean(childId && keptSessions.has(childId)));
+      useEffect(() => {
+        setKept(Boolean(childId && keptSessions.has(childId)));
+      }, [childId]);
+      const toggleKeep = () => {
+        if (!childId || childId === '__failed__') return;
+        if (keptSessions.has(childId)) keptSessions.delete(childId);
+        else keptSessions.add(childId);
+        persistKept();
+        setKept((value) => !value);
+      };
 
       useEffect(() => {
         if (!childId || childId === '__failed__') return undefined;
@@ -630,6 +673,18 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-sidechat-note' }, t('panel.unsupported')));
       }
       return h('div', { className: 'dsh-sidechat-panel' }, h(SideChatStyle),
+        h('button', {
+          type: 'button',
+          className: 'dsh-sidechat-keep',
+          'data-kept': kept ? 'true' : 'false',
+          title: kept ? t('keep.on') : t('keep.off'),
+          'aria-label': kept ? t('keep.on') : t('keep.off'),
+          'aria-pressed': kept,
+          onClick: toggleKeep,
+        }, h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none', 'aria-hidden': true },
+          kept
+            ? h('path', { d: 'M8 1.5 9.6 5.4l4.1.3-3.1 2.7 1 4-3.6-2.2-3.6 2.2 1-4L2.3 5.7l4.1-.3z', fill: 'currentColor' })
+            : h('path', { d: 'M8 1.5 9.6 5.4l4.1.3-3.1 2.7 1 4-3.6-2.2-3.6 2.2 1-4L2.3 5.7l4.1-.3z', stroke: 'currentColor', strokeWidth: 1.2, strokeLinejoin: 'round' }))),
         h(SessionProvider, { session: reference }, renderSlot(CONVERSATION_SLOT, {})));
     }
 
@@ -696,6 +751,8 @@ window.__ModuleLoader__.load({
 
         const disposeRule = ctx.uiConversation.userText.register(sideChatCiteRule);
 
+
+
         const disposeCiteNode = ctx.slots.inject('conversation.user.text.node', () => ctx.slots.register({
           name: 'conversation.user.text.node',
           key: CITE_ID,
@@ -714,6 +771,11 @@ window.__ModuleLoader__.load({
           const childSessionId = fromParams || (createdByTab.get(tab.id) ?? undefined);
           createdByTab.delete(tab.id);
           if (!childSessionId) return;
+          if (keptSessions.has(childSessionId)) {
+            keptSessions.delete(childSessionId);
+            persistKept();
+            return;
+          }
           Promise.resolve()
             .then(() => ctx.uiWorkspace.archiveSession(childSessionId, { stopActivity: true }))
             .catch((cause) => console.warn('[side-chat] archive failed', cause));
@@ -721,6 +783,7 @@ window.__ModuleLoader__.load({
 
         ctx.effect(() => () => {
           disposeClose();
+          disposeKeepItem();
           disposeCiteNode();
           disposeRule();
           disposeOverlay();
