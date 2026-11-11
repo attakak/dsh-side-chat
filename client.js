@@ -112,6 +112,8 @@ window.__ModuleLoader__.load({
 
     const CITE_ID = 'sideChatCite';
     const CITE_HEAD = '〔引自主对话';
+    const CITE_SIDE_HEAD = '〔引自此对话';
+    const CITE_HEADS = [CITE_HEAD, CITE_SIDE_HEAD];
     const CITE_END = '〔/引用〕';
 
     /** Match one whole citation block so the transcript can render it as a chip. */
@@ -119,7 +121,11 @@ window.__ModuleLoader__.load({
       id: CITE_ID,
       order: 50,
       match(text, from) {
-        const start = text.indexOf(CITE_HEAD, from);
+        let start = -1;
+        for (const candidate of CITE_HEADS) {
+          const at = text.indexOf(candidate, from);
+          if (at >= 0 && (start < 0 || at < start)) start = at;
+        }
         if (start < 0) return undefined;
         const headEnd = text.indexOf('〕', start);
         if (headEnd < 0) return undefined;
@@ -128,7 +134,11 @@ window.__ModuleLoader__.load({
         const seqMatch = /事件\s*(\d+)/.exec(head);
         const after = text.slice(headEnd + 1);
         const closeAt = after.indexOf(CITE_END);
-        const nextOpenAt = after.indexOf(CITE_HEAD);
+        let nextOpenAt = -1;
+        for (const candidate of CITE_HEADS) {
+          const at = after.indexOf(candidate);
+          if (at >= 0 && (nextOpenAt < 0 || at < nextOpenAt)) nextOpenAt = at;
+        }
         const hasBody = closeAt >= 0 && (nextOpenAt < 0 || closeAt < nextOpenAt);
         const end = hasBody ? headEnd + 1 + closeAt + CITE_END.length : headEnd + 1;
         const body = hasBody ? text.slice(headEnd + 1, headEnd + 1 + closeAt).trim() : '';
@@ -269,6 +279,34 @@ window.__ModuleLoader__.load({
     /** On-screen main Session and its Chat node reader, for locating citations. */
     const mainContext = { sessionId: null, actions: null, readSeq: null, draft: '' };
 
+    /**
+     * Composer state of every Session currently on screen, keyed by Session id.
+     * The selection menu writes into whichever Session holds the selection, so a
+     * passage picked inside a side chat lands in that side chat and nowhere else.
+     */
+    const sessionContexts = new Map();
+
+    /** A side Session is one this plugin created; anything else is a main conversation. */
+    function isSideSession(sessionId) {
+      for (const childId of createdByTab.values()) {
+        if (childId === sessionId) return true;
+      }
+      return false;
+    }
+
+    /** Map a DOM node key back to its event sequence number for one Session. */
+    function makeSeqReader(snapshot) {
+      return (key) => {
+        try {
+          const nodes = snapshot && snapshot.nodes;
+          const node = nodes && typeof nodes.get === 'function' ? nodes.get(key) : undefined;
+          return node && typeof node.anchorSeq === 'number' ? node.anchorSeq : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+    }
+
     /** Hand the main conversation to the side chat as hidden Host-injected context. */
     async function injectContext(childSessionId, parentSessionId, attempt = 0) {
       try {
@@ -307,15 +345,17 @@ window.__ModuleLoader__.load({
     }
 
     /** One-line citation: the event marker plus the selected passage, no extra lines. */
-    function buildCitationShort(sessionId, seq, text) {
+    function buildCitationShort(sessionId, seq, text, fromSide) {
       const where = seq === undefined ? '事件未知' : '事件 ' + String(seq);
-      return '〔引自主对话 · ' + sessionId + ' · ' + where + '〕「' + text + '」〔/引用〕';
+      const head = fromSide ? CITE_SIDE_HEAD : CITE_HEAD;
+      return head + ' · ' + sessionId + ' · ' + where + '〕「' + text + '」' + CITE_END;
     }
 
     /** Citation block carrying the source event number the model can re-read. */
-    function buildCitation(text, sessionId, seq) {
+    function buildCitation(text, sessionId, seq, fromSide) {
       const where = seq === undefined ? '事件未知' : '事件 ' + String(seq);
-      return '〔引自主对话 · ' + sessionId + ' · ' + where + '〕\n' + text + '\n〔/引用〕';
+      const head = fromSide ? CITE_SIDE_HEAD : CITE_HEAD;
+      return head + ' · ' + sessionId + ' · ' + where + '〕\n' + text + '\n' + CITE_END;
     }
 
     /** Send one prompt into a live side Session through the Host route. */
@@ -379,38 +419,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Invisible composer-row seat. Records the on-screen main Session and a
-     * reader that maps a DOM node key back to its event sequence number, so the
-     * root-scoped overlay can cite the exact source event.
+     * Invisible composer-row seat. Records every on-screen Session — the main
+     * one and each side chat — with a reader that maps a DOM node key back to
+     * its event sequence number, so the root-scoped overlay can cite the exact
+     * source event of whichever conversation the selection came from.
      */
-    function InputBridge({ sessionId, inputActions, useSessions, useChat, useInput }) {
-      // A side Session is one this plugin created; anything else is the main
-      // conversation, even when it was itself forked from another Session.
-      let isMain = true;
-      for (const childId of createdByTab.values()) {
-        if (childId === sessionId) {
-          isMain = false;
-          break;
-        }
-      }
+    function InputBridge({ sessionId, inputActions, useChat, useInput }) {
       const snapshot = useChat((value) => value);
       const input = useInput((value) => value);
       const draft = input && typeof input.draft === 'string' ? input.draft : '';
       useEffect(() => {
-        if (!isMain || !sessionId) return undefined;
-        mainContext.sessionId = sessionId;
-        mainContext.actions = inputActions || null;
-        mainContext.draft = draft;
-        mainContext.readSeq = (key) => {
-          try {
-            const nodes = snapshot && snapshot.nodes;
-            const node = nodes && typeof nodes.get === 'function' ? nodes.get(key) : undefined;
-            return node && typeof node.anchorSeq === 'number' ? node.anchorSeq : undefined;
-          } catch {
-            return undefined;
-          }
+        if (!sessionId) return undefined;
+        const entry = {
+          sessionId,
+          actions: inputActions || null,
+          draft,
+          readSeq: makeSeqReader(snapshot),
         };
+        sessionContexts.set(sessionId, entry);
+        if (!isSideSession(sessionId)) {
+          mainContext.sessionId = sessionId;
+          mainContext.actions = entry.actions;
+          mainContext.draft = draft;
+          mainContext.readSeq = entry.readSeq;
+        }
         return () => {
+          if (sessionContexts.get(sessionId) === entry) sessionContexts.delete(sessionId);
           if (mainContext.sessionId === sessionId) {
             mainContext.sessionId = null;
             mainContext.actions = null;
@@ -418,7 +452,7 @@ window.__ModuleLoader__.load({
             mainContext.draft = '';
           }
         };
-      }, [isMain, sessionId, inputActions, snapshot, draft]);
+      }, [sessionId, inputActions, snapshot, draft]);
       return null;
     }
 
@@ -458,11 +492,18 @@ window.__ModuleLoader__.load({
           if (!element) return;
           if (!element.closest('[data-slot="conversation.chat.flow"], [data-chat-flow], [data-conversation-scroll]')) return;
           if (element.closest('input, textarea, [contenteditable="true"]')) return;
+          // The passage belongs to whichever conversation renders it: a side
+          // chat panel marks itself, and anything else is the main conversation.
+          const sidePanel = element.closest('[data-dsh-sidechat-session]');
+          const sideSessionId = sidePanel ? sidePanel.getAttribute('data-dsh-sidechat-session') : null;
+          const fromSide = Boolean(sideSessionId) && sideSessionId !== '__failed__';
+          const targetSessionId = fromSide ? sideSessionId : mainContext.sessionId;
+          const target = targetSessionId ? sessionContexts.get(targetSessionId) : undefined;
           let seq;
           try {
             const row = element.closest('[data-chat-node-key]');
             const key = row ? row.getAttribute('data-chat-node-key') : null;
-            seq = key && mainContext.readSeq ? mainContext.readSeq(key) : undefined;
+            seq = key && target && target.readSeq ? target.readSeq(key) : undefined;
           } catch {
             seq = undefined;
           }
@@ -471,9 +512,10 @@ window.__ModuleLoader__.load({
           setPopover({
             text,
             seq,
+            fromSide,
             left: Math.max(8, Math.min(rect.left, window.innerWidth - 380)),
             top: Math.min(rect.bottom + 8, window.innerHeight - 90),
-            sessionId: mainContext.sessionId,
+            sessionId: targetSessionId,
           });
           setAsking(false);
           setError('');
@@ -504,14 +546,14 @@ window.__ModuleLoader__.load({
 
       if (!popover) return null;
       const sessionId = popover.sessionId || mainContext.sessionId;
+      const target = sessionId ? sessionContexts.get(sessionId) : undefined;
       const addToConversation = () => {
-        const actions = mainContext.actions;
-        if (!actions || !sessionId) return;
-        const citation = buildCitationShort(sessionId, popover.seq, popover.text) + '\n\n';
+        if (!sessionId || !target || !target.actions) return;
+        const citation = buildCitationShort(sessionId, popover.seq, popover.text, popover.fromSide) + '\n\n';
         try {
-          const span = actions.captureInsertion();
-          if (!actions.insertText(citation, span)) {
-            actions.setDraft(citation + (mainContext.draft || ''));
+          const span = target.actions.captureInsertion();
+          if (!target.actions.insertText(citation, span)) {
+            target.actions.setDraft(citation + (target.draft || ''));
           }
         } catch (cause) {
           console.warn('[side-chat] cite failed', cause);
@@ -523,8 +565,13 @@ window.__ModuleLoader__.load({
         if (!text || !sessionId || busy) return;
         setBusy(true);
         setError('');
+        const citation = buildCitation(popover.text, sessionId, popover.seq, popover.fromSide);
         try {
-          await askInSideChat(sessionId, buildCitation(popover.text, sessionId, popover.seq), text);
+          if (popover.fromSide) {
+            await sendSidePrompt(sessionId, citation + '\n\n' + text);
+          } else {
+            await askInSideChat(sessionId, citation, text);
+          }
           close();
         } catch (cause) {
           console.warn('[side-chat] ask failed', cause);
@@ -576,7 +623,7 @@ window.__ModuleLoader__.load({
               h('button', {
                 key: 'add',
                 type: 'button',
-                disabled: !sessionId || !mainContext.actions,
+                disabled: !sessionId || !target || !target.actions,
                 onMouseDown: (event) => event.preventDefault(),
                 onClick: addToConversation,
               }, t('ask.add')),
@@ -661,18 +708,18 @@ window.__ModuleLoader__.load({
       }, [childId]);
 
       if (childId === '__failed__') {
-        return h('div', { className: 'dsh-sidechat-panel' }, h(SideChatStyle),
+        return h('div', { className: 'dsh-sidechat-panel', 'data-dsh-sidechat-session': childId }, h(SideChatStyle),
           h('div', { className: 'dsh-sidechat-note' }, t('panel.failed')));
       }
       if (!reference) {
-        return h('div', { className: 'dsh-sidechat-panel' }, h(SideChatStyle),
+        return h('div', { className: 'dsh-sidechat-panel', 'data-dsh-sidechat-session': childId || '' }, h(SideChatStyle),
           h('div', { className: 'dsh-sidechat-note' }, t('panel.loading')));
       }
       if (typeof SessionProvider !== 'function' || typeof renderSlot !== 'function') {
-        return h('div', { className: 'dsh-sidechat-panel' }, h(SideChatStyle),
+        return h('div', { className: 'dsh-sidechat-panel', 'data-dsh-sidechat-session': childId || '' }, h(SideChatStyle),
           h('div', { className: 'dsh-sidechat-note' }, t('panel.unsupported')));
       }
-      return h('div', { className: 'dsh-sidechat-panel' }, h(SideChatStyle),
+      return h('div', { className: 'dsh-sidechat-panel', 'data-dsh-sidechat-session': childId || '' }, h(SideChatStyle),
         h('button', {
           type: 'button',
           className: 'dsh-sidechat-keep',
@@ -783,7 +830,6 @@ window.__ModuleLoader__.load({
 
         ctx.effect(() => () => {
           disposeClose();
-          disposeKeepItem();
           disposeCiteNode();
           disposeRule();
           disposeOverlay();
