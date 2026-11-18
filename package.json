@@ -1,6 +1,6 @@
 {
   "name": "dsh-side-chat",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "侧边聊天：在主对话旁并排开一个临时会话，不污染主线。Side chat beside the main conversation.",
   "license": "MIT",
   "private": true,

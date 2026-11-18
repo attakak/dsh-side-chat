@@ -286,12 +286,22 @@ window.__ModuleLoader__.load({
      */
     const sessionContexts = new Map();
 
-    /** A side Session is one this plugin created; anything else is a main conversation. */
-    function isSideSession(sessionId) {
-      for (const childId of createdByTab.values()) {
-        if (childId === sessionId) return true;
+    /**
+     * The Session shown in the main pane. Side-chat panels mark themselves, so
+     * any registered Session that no panel claims is the main conversation.
+     */
+    function visibleMainSessionId() {
+      const sideIds = new Set();
+      for (const node of document.querySelectorAll('[data-dsh-sidechat-session]')) {
+        const id = node.getAttribute('data-dsh-sidechat-session');
+        if (id) sideIds.add(id);
       }
-      return false;
+      let main = null;
+      for (const [id, entry] of sessionContexts) {
+        if (entry.side || sideIds.has(id)) continue;
+        main = id;
+      }
+      return main;
     }
 
     /** Map a DOM node key back to its event sequence number for one Session. */
@@ -428,16 +438,24 @@ window.__ModuleLoader__.load({
       const snapshot = useChat((value) => value);
       const input = useInput((value) => value);
       const draft = input && typeof input.draft === 'string' ? input.draft : '';
+      const anchorRef = useRef(null);
       useEffect(() => {
         if (!sessionId) return undefined;
+        // Where this composer actually renders decides what it is: a seat inside
+        // a side-chat panel belongs to that side chat, anything else is the main
+        // conversation — even when the Session was created as a side chat and
+        // later kept as a regular one.
+        const anchor = anchorRef.current;
+        const side = Boolean(anchor && anchor.closest('[data-dsh-sidechat-session]'));
         const entry = {
           sessionId,
           actions: inputActions || null,
           draft,
           readSeq: makeSeqReader(snapshot),
+          side,
         };
         sessionContexts.set(sessionId, entry);
-        if (!isSideSession(sessionId)) {
+        if (!side) {
           mainContext.sessionId = sessionId;
           mainContext.actions = entry.actions;
           mainContext.draft = draft;
@@ -453,7 +471,7 @@ window.__ModuleLoader__.load({
           }
         };
       }, [sessionId, inputActions, snapshot, draft]);
-      return null;
+      return h('span', { ref: anchorRef, 'aria-hidden': true, style: { display: 'none' } });
     }
 
     /** Selection-anchored menu: ask the side chat about the selected passage. */
@@ -497,7 +515,7 @@ window.__ModuleLoader__.load({
           const sidePanel = element.closest('[data-dsh-sidechat-session]');
           const sideSessionId = sidePanel ? sidePanel.getAttribute('data-dsh-sidechat-session') : null;
           const fromSide = Boolean(sideSessionId) && sideSessionId !== '__failed__';
-          const targetSessionId = fromSide ? sideSessionId : mainContext.sessionId;
+          const targetSessionId = fromSide ? sideSessionId : (mainContext.sessionId || visibleMainSessionId());
           const target = targetSessionId ? sessionContexts.get(targetSessionId) : undefined;
           let seq;
           try {
